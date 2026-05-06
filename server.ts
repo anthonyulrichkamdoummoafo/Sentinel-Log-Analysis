@@ -43,6 +43,7 @@ async function startServer() {
 
   const logBuffer: LogEntry[] = [];
   const alerts: Alert[] = [];
+  const blockedIps = new Set<string>();
   
   // Sliding window storage: IP -> [Timestamps]
   const requestWindows = new Map<string, number[]>();
@@ -53,14 +54,16 @@ async function startServer() {
   const PROBING_THRESHOLD_RATE = 0.5; // 50%
   const PROBING_MIN_REQUESTS = 10;
 
+  let logCounter = 0;
   function parseLogLine(line: string): LogEntry | null {
     // Regex for Apache/Nginx logs: ip - - [ts] "method path protocol" status bytes
     const regex = /^(\S+) - - \[(.*?)\] "(.*?) (.*?) (.*?)" (\d+) (\d+)$/;
     const match = line.match(regex);
     if (!match) return null;
 
+    logCounter++;
     return {
-      id: Math.random().toString(36).substr(2, 9) + '-' + Date.now(),
+      id: `${Math.random().toString(36).substr(2, 9)}-${Date.now()}-${logCounter}`,
       ip: match[1],
       timestamp: match[2],
       method: match[3],
@@ -72,23 +75,24 @@ async function startServer() {
   }
 
   function processLog(entry: LogEntry) {
+    if (blockedIps.has(entry.ip)) return; // Ignore traffic from blocked IPs
+
     const now = Date.now();
     
     // Update log buffer for frontend (keep last 50)
     logBuffer.push(entry);
     if (logBuffer.length > 50) logBuffer.shift();
 
-    // 1. DDoS Detection (Total requests per IP in window)
+    // 1. DDoS Detection
     if (!requestWindows.has(entry.ip)) requestWindows.set(entry.ip, []);
     const userWindow = requestWindows.get(entry.ip)!;
     userWindow.push(now);
     
-    // Clean old entries
     const filteredWindow = userWindow.filter(ts => now - ts < WINDOW_SIZE_MS);
     requestWindows.set(entry.ip, filteredWindow);
 
     if (filteredWindow.length > DDOS_THRESHOLD) {
-      const alertId = `ddos-${entry.ip}-${Math.floor(now/5000)}`; // Simple grouping
+      const alertId = `ddos-${entry.ip}-${Math.floor(now/5000)}`;
       if (!alerts.some(a => a.id === alertId)) {
         const alert: Alert = {
           id: alertId,
@@ -133,14 +137,14 @@ async function startServer() {
       }
     }
 
-    // Emit live log update
     io.emit('log_update', entry);
   }
 
   // --- API ROUTES ---
 
+  app.use(express.json());
+
   app.get('/api/stats', (req, res) => {
-    // Compute current stats for dashboard
     const topIps = Array.from(requestWindows.entries())
       .map(([ip, window]) => ({ ip, count: window.length }))
       .sort((a, b) => b.count - a.count)
@@ -155,8 +159,57 @@ async function startServer() {
       recentLogs: logBuffer,
       alerts,
       topIps,
-      statusDist
+      statusDist,
+      blockedIps: Array.from(blockedIps)
     });
+  });
+
+  app.post('/api/quarantine', (req, res) => {
+    const { ip } = req.body;
+    if (ip) {
+      blockedIps.add(ip);
+      io.emit('system_message', { type: 'BLOCK', ip, message: `IP ${ip} has been added to restricted list.` });
+      res.json({ success: true, message: `IP ${ip} blocked.` });
+    } else {
+      res.status(400).json({ error: 'Missing IP' });
+    }
+  });
+
+  app.post('/api/investigate', async (req, res) => {
+    const { alert } = req.body;
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(500).json({ error: "Gemini API key not configured." });
+    }
+
+    try {
+      const { GoogleGenerativeAI } = await import("@google/genai");
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+      const logsForIp = logBuffer.filter(l => l.ip === alert.ip).map(l => l.raw).join('\n');
+      
+      const prompt = `
+        You are a cybersecurity expert. Analyze the following logs and the alert generated for IP ${alert.ip}.
+        
+        ALERT TYPE: ${alert.type}
+        ALERT MESSAGE: ${alert.message}
+        
+        LOG CONTEXT:
+        ${logsForIp || "No specific log history available for this IP."}
+        
+        Provide a concise investigation report in markdown format including:
+        1. Attack assessment (True Positive vs False Positive)
+        2. Threat level (Low/Medium/High/Critical)
+        3. Recommended Actions (specific to this type of traffic)
+        Keep it professional and technical.
+      `;
+
+      const result = await model.generateContent(prompt);
+      res.json({ analysis: result.response.text() });
+    } catch (err) {
+      console.error("AI Investigation error:", err);
+      res.status(500).json({ error: "Failed to perform AI analysis." });
+    }
   });
 
   // --- START LOG GENERATOR ---

@@ -19,7 +19,12 @@ import {
   Clock,
   Search,
   Lock,
-  Cpu
+  Cpu,
+  Zap,
+  Info,
+  X,
+  ShieldAlert,
+  Loader2
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -32,8 +37,6 @@ import {
   PieChart, 
   Pie, 
   Cell,
-  LineChart,
-  Line,
   AreaChart,
   Area
 } from 'recharts';
@@ -42,13 +45,35 @@ import { format } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import Markdown from 'react-markdown';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 export default function App() {
-  const { logs, alerts } = useSocket();
+  const { logs, alerts, socket } = useSocket();
+  const [investigation, setInvestigation] = useState<{ alert: any, report: string | null, loading: boolean } | null>(null);
+  const [blockedIps, setBlockedIps] = useState<string[]>([]);
+
+  // Fetch initial blocked IPs
+  useEffect(() => {
+    fetch('/api/stats')
+      .then(res => res.json())
+      .then(data => {
+        if (data.blockedIps) setBlockedIps(data.blockedIps);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (socket) {
+      socket.on('system_message', (msg: any) => {
+        if (msg.type === 'BLOCK') {
+          setBlockedIps(prev => [...new Set([...prev, msg.ip])]);
+        }
+      });
+    }
+  }, [socket]);
 
   const dashboardData = useMemo(() => {
     const statusDist: Record<string, number> = {};
@@ -74,10 +99,91 @@ export default function App() {
     return { statusDist, topIps, pieData, areaData };
   }, [logs]);
 
+  const tackleInvestigate = async (alert: any) => {
+    setInvestigation({ alert, report: null, loading: true });
+    try {
+      const res = await fetch('/api/investigate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert })
+      });
+      const data = await res.json();
+      setInvestigation({ alert, report: data.analysis, loading: false });
+    } catch (err) {
+      setInvestigation(prev => prev ? { ...prev, loading: false, report: "Error performing AI investigation." } : null);
+    }
+  };
+
+  const tackleQuarantine = async (ip: string) => {
+    try {
+      await fetch('/api/quarantine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip })
+      });
+    } catch (err) {
+      console.error("Failed to block IP:", err);
+    }
+  };
+
   const COLORS = ['#141414', '#333333', '#666666', '#999999', '#CCCCCC'];
 
   return (
     <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-mono selection:bg-[#141414] selection:text-[#E4E3E0]">
+      {/* INVESTIGATION MODAL */}
+      <AnimatePresence>
+        {investigation && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/40 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-[#E4E3E0] border-2 border-[#141414] w-full max-w-2xl shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col max-h-[80vh]"
+            >
+              <div className="p-4 border-b-2 border-[#141414] bg-[#141414] text-[#E4E3E0] flex justify-between items-center">
+                <span className="text-xs font-bold uppercase tracking-widest flex items-center gap-2 italic">
+                  <ShieldAlert className="w-4 h-4 text-amber-500" /> AI Forensics Report: {investigation.alert.ip}
+                </span>
+                <button onClick={() => setInvestigation(null)} className="hover:text-red-500 transition-colors">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-6 markdown-body text-sm leading-relaxed">
+                {investigation.loading ? (
+                  <div className="h-40 flex flex-col items-center justify-center gap-4 opacity-50">
+                    <Loader2 className="w-8 h-8 animate-spin" />
+                    <p className="text-[10px] font-bold uppercase tracking-widest animate-pulse">Consulting Cyber Intelligence...</p>
+                  </div>
+                ) : (
+                  <div className="prose prose-sm prose-slate max-w-none">
+                    <Markdown>{investigation.report}</Markdown>
+                  </div>
+                )}
+              </div>
+              {!investigation.loading && (
+                <div className="p-4 border-t-2 border-[#141414] bg-[#D4D3D0] flex justify-end gap-3">
+                   <button 
+                    onClick={() => setInvestigation(null)}
+                    className="px-4 py-2 text-[10px] font-bold uppercase border border-[#141414] hover:bg-[#141414] hover:text-[#E4E3E0]"
+                   >
+                     CLOSE
+                   </button>
+                   <button 
+                    onClick={() => { tackleQuarantine(investigation.alert.ip); setInvestigation(null); }}
+                    className="px-4 py-2 text-[10px] font-bold uppercase bg-red-600 text-white border border-[#141414] hover:bg-black"
+                   >
+                     EXECUTE QUARANTINE
+                   </button>
+                </div>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* HEADER */}
       <header className="border-b border-[#141414] p-4 flex justify-between items-center bg-[#D4D3D0] sticky top-0 z-50">
         <div className="flex items-center gap-3">
@@ -89,10 +195,10 @@ export default function App() {
         </div>
         <div className="flex items-center gap-6">
           <div className="text-right hidden sm:block">
-            <p className="text-[10px] leading-none opacity-50 uppercase mb-1">System Status</p>
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 bg-green-600 rounded-full animate-pulse" />
-              <span className="text-xs font-bold uppercase tracking-widest">Live Ingestion Active</span>
+            <p className="text-[10px] leading-none opacity-50 uppercase mb-1">Blocked Entities</p>
+            <div className="flex items-center justify-end gap-2">
+              <span className="text-xs font-bold uppercase tracking-widest">{blockedIps.length} IPS</span>
+              <Lock className="w-3 h-3 opacity-60" />
             </div>
           </div>
           <div className="w-10 h-10 border border-[#141414] flex items-center justify-center">
@@ -218,7 +324,12 @@ export default function App() {
                         >
                           <td className="px-4 py-2 font-sans opacity-40">{i + 1}</td>
                           <td className="px-4 py-2 font-medium">{log.timestamp}</td>
-                          <td className="px-4 py-2 font-bold group-hover:text-amber-400">{log.ip}</td>
+                          <td className="px-4 py-2 font-bold group-hover:text-amber-400">
+                            <span className="flex items-center gap-2">
+                              {log.ip}
+                              {blockedIps.includes(log.ip) && <Lock className="w-3 h-3 text-red-500" />}
+                            </span>
+                          </td>
                           <td className="px-4 py-2 uppercase opacity-60">{log.method}</td>
                           <td className="px-4 py-2 opacity-80 max-w-[200px] truncate">{log.path}</td>
                           <td className={cn(
@@ -271,8 +382,26 @@ export default function App() {
                     </div>
                     <p className="text-xs font-bold leading-tight mb-2 uppercase">{alert.message}</p>
                     <div className="flex justify-between items-center pt-2 border-t border-[#141414]/10">
-                      <span className="text-[9px] opacity-60">SOURCE: {alert.ip}</span>
-                      <button className="text-[9px] font-bold uppercase underline hover:no-underline">QUARANTINE</button>
+                      <div className="flex flex-col">
+                        <span className="text-[9px] opacity-60">SOURCE: {alert.ip}</span>
+                        {blockedIps.includes(alert.ip) && <span className="text-[7px] text-red-600 font-bold uppercase tracking-tighter">RESTRICTED</span>}
+                      </div>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => tackleInvestigate(alert)}
+                          className="text-[9px] font-bold uppercase bg-[#141414] text-white px-2 py-1 flex items-center gap-1"
+                        >
+                          <Zap className="w-3 h-3" /> Investigate
+                        </button>
+                        {!blockedIps.includes(alert.ip) && (
+                          <button 
+                            onClick={() => tackleQuarantine(alert.ip)}
+                            className="text-[9px] font-bold uppercase border border-[#141414] px-2 py-1 hover:bg-[#141414] hover:text-[#E4E3E0]"
+                          >
+                            Block
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </motion.div>
                 ))}
@@ -288,6 +417,7 @@ export default function App() {
                 <p># SYSTEM_READY</p>
                 <p>&gt; Ingesting stream from subprocess: log_generator.py</p>
                 <p>&gt; Sliding window initialized: 60000ms</p>
+                <p>&gt; AI Module Status: ONLINE (Gemini-1.5-Flash)</p>
                 <p>&gt; Thresholds: DDoS &gt; 100 req/min | Probing &gt; 50% err</p>
                 <p className="animate-pulse">_</p>
              </div>

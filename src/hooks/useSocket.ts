@@ -20,11 +20,18 @@ export const useSocket = () => {
     setSocket(s);
 
     s.on('log_update', (log) => {
-      setLogs((prev) => [log, ...prev].slice(0, 50));
+      setLogs((prev) => {
+        // Prevent duplicates by checking ID
+        if (prev.some(p => p.id === log.id)) return prev;
+        return [log, ...prev].slice(0, 50);
+      });
     });
 
     s.on('new_alert', (alert) => {
-      setAlerts((prev) => [alert, ...prev].slice(0, 50));
+      setAlerts((prev) => {
+        if (prev.some(p => p.id === alert.id)) return prev;
+        return [alert, ...prev].slice(0, 50);
+      });
     });
 
     return () => {

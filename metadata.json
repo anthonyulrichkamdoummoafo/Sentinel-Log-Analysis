@@ -1,0 +1,6 @@
+{
+  "name": "Sentinel Log Analysis System",
+  "description": "A real-time cybersecurity telemetry platform for ingesting, parsing, and detecting threats in web server logs using stream processing and AI analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["Real-time threat detection", "Log parsing", "Data visualization"]
+}
